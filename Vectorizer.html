@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Offline Vector SVG Converter</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --accent: #38bdf8;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background: var(--bg); color: var(--text); padding: 24px; min-height: 100vh; display: flex; flex-direction: column; align-items: center; }
+    .container { width: 100%; max-width: 1000px; display: flex; flex-direction: column; gap: 20px; }
+    header h1 { font-size: 1.5rem; margin-bottom: 4px; }
+    header p { color: var(--text-muted); font-size: 0.9rem; }
+    
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+    
+    .upload-zone {
+      border: 2px dashed var(--border);
+      border-radius: 8px;
+      padding: 30px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s;
+    }
+    .upload-zone:hover { border-color: var(--accent); }
+    input[type="file"] { display: none; }
+
+    .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-top: 16px; }
+    .control-group { display: flex; flex-direction: column; gap: 6px; }
+    label { font-size: 0.85rem; color: var(--text-muted); }
+    input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+    .actions { display: flex; gap: 12px; margin-top: 16px; }
+    button {
+      padding: 10px 18px;
+      border: none;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-primary { background: var(--accent); color: #000; }
+    .btn-secondary { background: #334155; color: var(--text); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .previews { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    @media (max-width: 768px) { .previews { grid-template-columns: 1fr; } }
+    .preview-box {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      min-height: 280px;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: #111827;
+    }
+    .preview-header { padding: 8px 12px; background: rgba(255,255,255,0.05); font-size: 0.8rem; font-weight: 600; }
+    .preview-content {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+    }
+    .preview-content img, .preview-content svg { max-width: 100%; max-height: 350px; object-fit: contain; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Raster to Vector SVG Converter</h1>
+      <p>Convert JPG/PNG into editable geometric SVG vectors directly in Edge.</p>
+    </header>
+
+    <div class="card">
+      <div class="upload-zone" onclick="document.getElementById('fileInput').click()">
+        <p id="uploadText">Click or drop a JPG / PNG image here</p>
+        <input type="file" id="fileInput" accept="image/jpeg, image/jpg, image/png" />
+      </div>
+
+      <div class="controls">
+        <div class="control-group">
+          <label>Color Levels (Posterize): <span id="posterizeVal">6</span></label>
+          <input type="range" id="posterizeInput" min="2" max="16" value="6" />
+        </div>
+        <div class="control-group">
+          <label>Sampling Resolution: <span id="resVal">2</span>px</label>
+          <input type="range" id="resInput" min="1" max="6" value="2" />
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="convertBtn" class="btn-primary" disabled>Convert to Vector</button>
+        <button id="downloadBtn" class="btn-secondary" disabled>Download SVG</button>
+      </div>
+    </div>
+
+    <div class="previews">
+      <div class="preview-box">
+        <div class="preview-header">Original Raster</div>
+        <div class="preview-content" id="rasterPreview">
+          <span style="color: var(--text-muted); font-size: 0.85rem;">No image selected</span>
+        </div>
+      </div>
+      <div class="preview-box">
+        <div class="preview-header">Generated Editable Vector (SVG)</div>
+        <div class="preview-content" id="vectorPreview">
+          <span style="color: var(--text-muted); font-size: 0.85rem;">Vector output will appear here</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <canvas id="offscreenCanvas" style="display:none;"></canvas>
+
+  <script>
+    const fileInput = document.getElementById('fileInput');
+    const uploadText = document.getElementById('uploadText');
+    const convertBtn = document.getElementById('convertBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const rasterPreview = document.getElementById('rasterPreview');
+    const vectorPreview = document.getElementById('vectorPreview');
+    const posterizeInput = document.getElementById('posterizeInput');
+    const posterizeVal = document.getElementById('posterizeVal');
+    const resInput = document.getElementById('resInput');
+    const resVal = document.getElementById('resVal');
+    const canvas = document.getElementById('offscreenCanvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+    let activeImage = null;
+    let generatedSvgString = null;
+
+    posterizeInput.addEventListener('input', () => posterizeVal.textContent = posterizeInput.value);
+    resInput.addEventListener('input', () => resVal.textContent = resInput.value);
+
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      uploadText.textContent = file.name;
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          activeImage = img;
+          rasterPreview.innerHTML = `<img src="${event.target.result}" alt="Original" />`;
+          convertBtn.disabled = false;
+          downloadBtn.disabled = true;
+          vectorPreview.innerHTML = `<span style="color: var(--text-muted); font-size: 0.85rem;">Ready to convert.</span>`;
+        };
+        img.src = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+
+    function quantize(val, levels) {
+      const step = 255 / (levels - 1);
+      return Math.round(Math.round(val / step) * step);
+    }
+
+    convertBtn.addEventListener('click', () => {
+      if (!activeImage) return;
+
+      convertBtn.disabled = true;
+      convertBtn.textContent = 'Tracing...';
+
+      setTimeout(() => {
+        const maxDim = 800;
+        let w = activeImage.naturalWidth;
+        let h = activeImage.naturalHeight;
+
+        if (w > maxDim || h > maxDim) {
+          if (w > h) {
+            h = Math.round((h * maxDim) / w);
+            w = maxDim;
+          } else {
+            w = Math.round((w * maxDim) / h);
+            h = maxDim;
+          }
+        }
+
+        canvas.width = w;
+        canvas.height = h;
+        ctx.clearRect(0, 0, w, h);
+        ctx.drawImage(activeImage, 0, 0, w, h);
+
+        const imgData = ctx.getImageData(0, 0, w, h).data;
+        const levels = parseInt(posterizeInput.value, 10);
+        const step = parseInt(resInput.value, 10);
+
+        const colorPaths = new Map();
+
+        for (let y = 0; y < h; y += step) {
+          for (let x = 0; x < w; x += step) {
+            const idx = (y * w + x) * 4;
+            const a = imgData[idx + 3];
+            if (a < 10) continue;
+
+            const r = quantize(imgData[idx], levels);
+            const g = quantize(imgData[idx + 1], levels);
+            const b = quantize(imgData[idx + 2], levels);
+            const hex = `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+
+            if (!colorPaths.has(hex)) {
+              colorPaths.set(hex, []);
+            }
+            
+            const rw = Math.min(step, w - x);
+            const rh = Math.min(step, h - y);
+            colorPaths.get(hex).push(`M${x},${y}h${rw}v${rh}h-${rw}z`);
+          }
+        }
+
+        let pathsSvg = '';
+        for (const [hex, dArray] of colorPaths.entries()) {
+          pathsSvg += `<path fill="${hex}" d="${dArray.join(' ')}" />\n`;
+        }
+
+        generatedSvgString = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" width="100%" height="100%" shape-rendering="crispEdges">\n${pathsSvg}</svg>`;
+
+        vectorPreview.innerHTML = generatedSvgString;
+        convertBtn.disabled = false;
+        convertBtn.textContent = 'Convert to Vector';
+        downloadBtn.disabled = false;
+      }, 30);
+    });
+
+    downloadBtn.addEventListener('click', () => {
+      if (!generatedSvgString) return;
+      const blob = new Blob([generatedSvgString], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `vector-${Date.now()}.svg`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    });
+  </script>
+</body>
+</html>
